@@ -62,40 +62,90 @@ function cluster(values,tol=13){
   return groups.map(g=>g.reduce((a,b)=>a+b,0)/g.length);
 }
 
+function isStrongTilePixel(rgb,t,d){
+  if(d>=24) return false;
+  // Orange game background is close to NORMAL/YELLOW in color, but real tiles are
+  // much brighter. Blue/green tiles are separated by channel dominance instead.
+  if(t===NORMAL || t===YELLOW) return rgb[0]>198 && rgb[1]>135;
+  if(t===GREEN) return rgb[1]>rgb[0]+10 && rgb[1]>rgb[2]+5;
+  if(t===BLUE) return rgb[2]>rgb[0]+25 && rgb[2]>rgb[1]+15;
+  return false;
+}
+
+function isValidPiece(p){
+  p=normalizePiece(p);
+  if(!p.length || p.length>6) return false;
+  const maxr=Math.max(...p.map(x=>x[0])), maxc=Math.max(...p.map(x=>x[1]));
+  if(maxr>4 || maxc>4) return false;
+  const set=new Set(p.map(x=>x[0]+','+x[1]));
+  const seen=new Set(), q=[[p[0][0],p[0][1]]];
+  while(q.length){
+    const [r,c]=q.shift(), k=r+','+c;
+    if(seen.has(k) || !set.has(k)) continue;
+    seen.add(k);
+    q.push([r-1,c],[r+1,c],[r,c-1],[r,c+1]);
+  }
+  return seen.size===set.size;
+}
+
 function detectPiece(imgData,slot){
   const {data,width:w,height:h}=imgData;
   const x1=Math.floor(PIECE_X_RANGES[slot][0]*w), x2=Math.floor(PIECE_X_RANGES[slot][1]*w);
   const y1=Math.floor(PIECE_Y_RANGE[0]*h), y2=Math.floor(PIECE_Y_RANGE[1]*h);
   const cw=x2-x1, ch=y2-y1;
-  const mask=new Uint8Array(cw*ch), typeMap=new Uint8Array(cw*ch);
+  const mask=new Uint8Array(cw*ch);
+
+  // Primary detector: only accept pixels that look like an actual tile, not the
+  // orange panel/background. This prevents an empty slot from becoming a fake piece.
   for(let y=0;y<ch;y++) for(let x=0;x<cw;x++){
-    const rgb=getRgb(data,w,h,x+x1,y+y1); const [t,d]=nearestType(rgb,false); const idx=y*cw+x;
-    // Slightly wider tolerance than v1. Gem tiles use gradients and can be much darker
-    // than the center prototype, especially on Samsung screen captures.
-    if(d<24){mask[idx]=1; typeMap[idx]=t;}
+    const rgb=getRgb(data,w,h,x+x1,y+y1);
+    const [t,d]=nearestType(rgb,false);
+    if(isStrongTilePixel(rgb,t,d)) mask[y*cw+x]=1;
   }
-  const seen=new Uint8Array(cw*ch), cand=[]; const dirs=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
+
+  const seen=new Uint8Array(cw*ch), cand=[];
+  const dirs=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
   for(let sy=0;sy<ch;sy++) for(let sx=0;sx<cw;sx++){
     const sidx=sy*cw+sx; if(!mask[sidx]||seen[sidx]) continue;
     const q=[[sx,sy]]; seen[sidx]=1; let qi=0,minx=sx,maxx=sx,miny=sy,maxy=sy; const pts=[];
-    while(qi<q.length){const [x,y]=q[qi++]; pts.push([x,y]); minx=Math.min(minx,x);maxx=Math.max(maxx,x);miny=Math.min(miny,y);maxy=Math.max(maxy,y);
-      for(const [dx,dy] of dirs){const nx=x+dx,ny=y+dy;if(nx<0||nx>=cw||ny<0||ny>=ch)continue;const ni=ny*cw+nx;if(mask[ni]&&!seen[ni]){seen[ni]=1;q.push([nx,ny]);}}
+    while(qi<q.length){
+      const [x,y]=q[qi++]; pts.push([x,y]);
+      minx=Math.min(minx,x); maxx=Math.max(maxx,x); miny=Math.min(miny,y); maxy=Math.max(maxy,y);
+      for(const [dx,dy] of dirs){
+        const nx=x+dx,ny=y+dy;
+        if(nx<0||nx>=cw||ny<0||ny>=ch) continue;
+        const ni=ny*cw+nx;
+        if(mask[ni]&&!seen[ni]){seen[ni]=1;q.push([nx,ny]);}
+      }
     }
     const ww=maxx-minx+1, hh=maxy-miny+1, area=pts.length;
-    if(ww>=14&&ww<=42&&hh>=10&&hh<=42&&area>=35){
+    if(ww>=12&&ww<=42&&hh>=10&&hh<=42&&area>=28){
+      const cx=x1+(minx+maxx)/2, cy=y1+(miny+maxy)/2;
       const rgbs=pts.map(([x,y])=>getRgb(data,w,h,x+x1,y+y1));
-      const t=nearestType(medianRgb(rgbs),false)[0];
-      cand.push([x1+(minx+maxx)/2,y1+(miny+maxy)/2,t,area]);
+      let t=nearestType(medianRgb(rgbs),false)[0];
+
+      // Re-check around the center. Gem icons can split a tile into several colors.
+      const centerPix=[];
+      for(let yy=-6;yy<=6;yy+=3) for(let xx=-6;xx<=6;xx+=3) centerPix.push(getRgb(data,w,h,cx+xx,cy+yy));
+      const ct=nearestType(medianRgb(centerPix),false)[0];
+      if(ct===BLUE || ct===GREEN) t=ct;
+      cand.push([cx,cy,t,area]);
     }
   }
-  // Fallback for gem-heavy pieces. The icon can fragment the tile into tiny regions,
-  // which caused v1 to miss pieces made mostly or entirely of green/blue/yellow cells.
-  // Build a density map for each gem color, then add one candidate per strong peak.
-  for(const gemType of [BLUE,GREEN,YELLOW]){
+
+  // Gem-only pieces sometimes fragment too much for the component detector.
+  // Blue and green are safe to recover by hue because the orange background cannot
+  // masquerade as either color. Do not use the old wide yellow fallback, which was
+  // responsible for phantom pieces in empty slots.
+  for(const gemType of [BLUE,GREEN]){
     const gm=new Uint8Array(cw*ch);
     for(let y=0;y<ch;y++) for(let x=0;x<cw;x++){
-      const rgb=getRgb(data,w,h,x+x1,y+y1); const [t,d]=nearestType(rgb,false);
-      if(t===gemType && d<42) gm[y*cw+x]=1;
+      const rgb=getRgb(data,w,h,x+x1,y+y1);
+      const [t,d]=nearestType(rgb,false);
+      const hueOk = gemType===BLUE
+        ? (rgb[2]>rgb[0]+25 && rgb[2]>rgb[1]+12)
+        : (rgb[1]>rgb[0]+12 && rgb[1]>rgb[2]+4);
+      if(t===gemType && d<44 && hueOk) gm[y*cw+x]=1;
     }
     const stride=cw+1, integral=new Int32Array((cw+1)*(ch+1));
     for(let y=0;y<ch;y++){
@@ -105,17 +155,16 @@ function detectPiece(imgData,slot){
         integral[(y+1)*stride+(x+1)]=integral[y*stride+(x+1)]+row;
       }
     }
-    const peaks=[];
-    const half=9;
+    const peaks=[], half=9;
     for(let y=half;y<ch-half;y+=2) for(let x=half;x<cw-half;x+=2){
       const xa=x-half, xb=x+half, ya=y-half, yb=y+half;
       const sum=integral[yb*stride+xb]-integral[ya*stride+xb]-integral[yb*stride+xa]+integral[ya*stride+xa];
-      if(sum>=55) peaks.push([sum,x,y]);
+      if(sum>=42) peaks.push([sum,x,y]);
     }
     peaks.sort((a,b)=>b[0]-a[0]);
     const kept=[];
     for(const [sum,x,y] of peaks){
-      if(kept.some(p=>Math.abs(p[0]-x)<22 && Math.abs(p[1]-y)<22)) continue;
+      if(kept.some(p=>Math.abs(p[0]-x)<23 && Math.abs(p[1]-y)<23)) continue;
       kept.push([x,y]);
       cand.push([x+x1,y+y1,gemType,sum]);
       if(kept.length>=6) break;
@@ -123,19 +172,37 @@ function detectPiece(imgData,slot){
   }
 
   if(!cand.length) return [];
+
   const merged=[], used=Array(cand.length).fill(false);
   for(let i=0;i<cand.length;i++){
-    if(used[i])continue; used[i]=true; const g=[cand[i]];
-    for(let j=i+1;j<cand.length;j++) if(!used[j]&&Math.abs(cand[i][0]-cand[j][0])<20&&Math.abs(cand[i][1]-cand[j][1])<20){used[j]=true;g.push(cand[j]);}
+    if(used[i]) continue;
+    used[i]=true; const g=[cand[i]];
+    for(let j=i+1;j<cand.length;j++){
+      if(!used[j]&&Math.abs(cand[i][0]-cand[j][0])<19&&Math.abs(cand[i][1]-cand[j][1])<19){
+        used[j]=true; g.push(cand[j]);
+      }
+    }
     g.sort((a,b)=>((b[2]!==NORMAL)-(a[2]!==NORMAL)) || b[3]-a[3]);
-    merged.push([g.reduce((s,z)=>s+z[0],0)/g.length,g.reduce((s,z)=>s+z[1],0)/g.length,g[0][2]]);
+    merged.push([
+      g.reduce((s,z)=>s+z[0],0)/g.length,
+      g.reduce((s,z)=>s+z[1],0)/g.length,
+      g[0][2]
+    ]);
   }
-  const xs=cluster(merged.map(x=>x[0])), ys=cluster(merged.map(x=>x[1])); const map=new Map();
+
+  const xs=cluster(merged.map(x=>x[0])), ys=cluster(merged.map(x=>x[1]));
+  const map=new Map();
   for(const [x,y,t] of merged){
-    let c=0,r=0; for(let i=1;i<xs.length;i++)if(Math.abs(x-xs[i])<Math.abs(x-xs[c]))c=i; for(let i=1;i<ys.length;i++)if(Math.abs(y-ys[i])<Math.abs(y-ys[r]))r=i;
-    const k=r+','+c; const prev=map.get(k); if(prev==null||(prev===NORMAL&&t!==NORMAL))map.set(k,t);
+    let c=0,r=0;
+    for(let i=1;i<xs.length;i++) if(Math.abs(x-xs[i])<Math.abs(x-xs[c])) c=i;
+    for(let i=1;i<ys.length;i++) if(Math.abs(y-ys[i])<Math.abs(y-ys[r])) r=i;
+    const k=r+','+c, prev=map.get(k);
+    if(prev==null || (prev===NORMAL&&(t===BLUE||t===GREEN||t===YELLOW))) map.set(k,t);
   }
-  return normalizePiece([...map.entries()].map(([k,v])=>{const [r,c]=k.split(',').map(Number);return [r,c,v];}));
+  const p=normalizePiece([...map.entries()].map(([k,v])=>{
+    const [r,c]=k.split(',').map(Number); return [r,c,v];
+  }));
+  return isValidPiece(p) ? p : [];
 }
 
 function normalizePiece(p){if(!p.length)return[];const mr=Math.min(...p.map(x=>x[0])),mc=Math.min(...p.map(x=>x[1]));return p.map(([r,c,v])=>[r-mr,c-mc,v]).sort((a,b)=>a[0]-b[0]||a[1]-b[1]);}
@@ -153,18 +220,52 @@ function complete(c){return [BLUE,GREEN,YELLOW].every(k=>(c[k]||0)>=TARGETS[k]);
 function quality(b){const empty=b.flat().filter(x=>x===EMPTY).length;const rf=b.map(r=>r.filter(x=>x!==EMPTY).length),cf=Array.from({length:8},(_,c)=>b.filter(r=>r[c]!==EMPTY).length);const near=rf.filter(x=>x===7).length+cf.filter(x=>x===7).length;const blocked=rf.filter(x=>x>=5).length+cf.filter(x=>x>=5).length;return[empty,near,-blocked];}
 function cmpScore(a,b){for(let i=0;i<a.length;i++){if(a[i]!==b[i])return a[i]-b[i];}return 0;}
 function score(initial,counts,b,moves){const im=[BLUE,GREEN,YELLOW].reduce((s,k)=>s+Math.max(0,TARGETS[k]-(initial[k]||0)),0),tm=[BLUE,GREEN,YELLOW].reduce((s,k)=>s+Math.max(0,TARGETS[k]-(counts[k]||0)),0),lines=moves.reduce((s,m)=>s+m.rows.length+m.cols.length,0);return[im-tm,-tm,lines,...quality(b)];}
-function permutations3(){return[[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];}
-function solve(board,pieces,current){
-  pieces=pieces.map(normalizePiece); if(pieces.length!==3||pieces.some(p=>!p.length))throw Error('Could not detect all three pieces'); let best=null, completed=[];
-  function consider(b,c,m){const sc=score(current,c,b,m),sol={moves:m.slice(),board:cloneBoard(b),counts:{...c},completed:complete(c),score:sc};if(sol.completed)completed.push(sol);if(!best||cmpScore(sol.score,best.score)>0)best=sol;}
-  for(const order of permutations3()){
-    function dfs(depth,b,c,m){if(complete(c)||depth===3){consider(b,c,m);return;}const pi=order[depth],p=pieces[pi];let any=false;for(const [top,left] of legalPositions(b,p)){any=true;const x=placeAndClear(b,p,top,left),nc=addCounts(c,x.gained);dfs(depth+1,x.board,nc,m.concat([{piece:pi,row:top,col:left,gained:x.gained,rows:x.rows,cols:x.cols}]));}if(!any)consider(b,c,m);}
-    dfs(0,board,current,[]);
+function permutations(arr){
+  if(arr.length<=1) return [arr.slice()];
+  const out=[];
+  for(let i=0;i<arr.length;i++){
+    const head=arr[i], rest=arr.slice(0,i).concat(arr.slice(i+1));
+    for(const p of permutations(rest)) out.push([head].concat(p));
   }
-  if(completed.length){const min=Math.min(...completed.map(s=>s.moves.length));return completed.filter(s=>s.moves.length===min).sort((a,b)=>cmpScore(b.score,a.score))[0];}
-  return best;
+  return out;
 }
 
+function solve(board,pieces,current){
+  const detected=pieces.map((p,slot)=>({slot,piece:normalizePiece(p)})).filter(x=>x.piece.length);
+  if(!detected.length) throw Error('Could not detect any remaining pieces');
+  let best=null, completed=[];
+
+  function consider(b,c,m){
+    const sc=score(current,c,b,m);
+    const sol={moves:m.slice(),board:cloneBoard(b),counts:{...c},completed:complete(c),score:sc};
+    if(sol.completed) completed.push(sol);
+    if(!best||cmpScore(sol.score,best.score)>0) best=sol;
+  }
+
+  const ids=detected.map((_,i)=>i);
+  for(const order of permutations(ids)){
+    function dfs(depth,b,c,m){
+      if(complete(c)||depth===order.length){consider(b,c,m);return;}
+      const d=detected[order[depth]], p=d.piece;
+      let any=false;
+      for(const [top,left] of legalPositions(b,p)){
+        any=true;
+        const x=placeAndClear(b,p,top,left), nc=addCounts(c,x.gained);
+        dfs(depth+1,x.board,nc,m.concat([{
+          piece:d.slot,row:top,col:left,gained:x.gained,rows:x.rows,cols:x.cols
+        }]));
+      }
+      if(!any) consider(b,c,m);
+    }
+    dfs(0,board,current,[]);
+  }
+
+  if(completed.length){
+    const min=Math.min(...completed.map(s=>s.moves.length));
+    return completed.filter(s=>s.moves.length===min).sort((a,b)=>cmpScore(b.score,a.score))[0];
+  }
+  return best;
+}
 
 function pieceName(i){ return PIECE_NAMES[i] || ('PIECE '+(i+1)); }
 
@@ -202,11 +303,15 @@ function solveScreenshot(dataUrl,blue,green,yellow){
         const id=x.getImageData(0,0,c.width,c.height);
         const board=detectBoard(id);
         const pieces=[0,1,2].map(i=>detectPiece(id,i));
-        const missing=pieces.map((p,i)=>p.length?null:PIECE_NAMES[i]).filter(Boolean);
-        if(missing.length) throw Error('Could not detect: '+missing.join(', ')+'. Keep the pieces fully visible and tap SOLVE again.');
+        const visible=pieces.map((p,i)=>p.length?PIECE_NAMES[i]:null).filter(Boolean);
+        if(!visible.length) throw Error('Could not detect any pieces. Wait until the pieces are fully visible and tap SOLVE again.');
         const current={[BLUE]:+blue||0,[GREEN]:+green||0,[YELLOW]:+yellow||0};
         const sol=solve(board,pieces,current);
-        AndroidBridge.onSolved(JSON.stringify(solutionPayload(sol,pieces)));
+        const payload=solutionPayload(sol,pieces);
+        payload.summary = visible.length<3
+          ? ('Detected '+visible.join(' + ')+'   |   '+payload.summary)
+          : payload.summary;
+        AndroidBridge.onSolved(JSON.stringify(payload));
       }catch(e){
         AndroidBridge.onSolved(JSON.stringify({ok:false,error:String(e&&e.message?e.message:e)}));
       }
