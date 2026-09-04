@@ -10,7 +10,7 @@ const CLASSNAMES=['empty','normal','blue','green','yellow'];
 
 const BOARD_X0=128/709, BOARD_Y0=529/1536, BOARD_DX=65/709, BOARD_DY=65/1536;
 const PIECE_X_RANGES=[[100/709,245/709],[285/709,440/709],[475/709,620/709]];
-const PIECE_Y_RANGE=[1095/1536,1230/1536];
+const PIECE_Y_RANGE=[1060/1536,1250/1536];
 const PROTO_RGB={
   [EMPTY]:[96,76,73],
   [NORMAL]:[239,174,109],
@@ -70,7 +70,9 @@ function detectPiece(imgData,slot){
   const mask=new Uint8Array(cw*ch), typeMap=new Uint8Array(cw*ch);
   for(let y=0;y<ch;y++) for(let x=0;x<cw;x++){
     const rgb=getRgb(data,w,h,x+x1,y+y1); const [t,d]=nearestType(rgb,false); const idx=y*cw+x;
-    if(d<18){mask[idx]=1; typeMap[idx]=t;}
+    // Slightly wider tolerance than v1. Gem tiles use gradients and can be much darker
+    // than the center prototype, especially on Samsung screen captures.
+    if(d<24){mask[idx]=1; typeMap[idx]=t;}
   }
   const seen=new Uint8Array(cw*ch), cand=[]; const dirs=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
   for(let sy=0;sy<ch;sy++) for(let sx=0;sx<cw;sx++){
@@ -86,11 +88,45 @@ function detectPiece(imgData,slot){
       cand.push([x1+(minx+maxx)/2,y1+(miny+maxy)/2,t,area]);
     }
   }
+  // Fallback for gem-heavy pieces. The icon can fragment the tile into tiny regions,
+  // which caused v1 to miss pieces made mostly or entirely of green/blue/yellow cells.
+  // Build a density map for each gem color, then add one candidate per strong peak.
+  for(const gemType of [BLUE,GREEN,YELLOW]){
+    const gm=new Uint8Array(cw*ch);
+    for(let y=0;y<ch;y++) for(let x=0;x<cw;x++){
+      const rgb=getRgb(data,w,h,x+x1,y+y1); const [t,d]=nearestType(rgb,false);
+      if(t===gemType && d<42) gm[y*cw+x]=1;
+    }
+    const stride=cw+1, integral=new Int32Array((cw+1)*(ch+1));
+    for(let y=0;y<ch;y++){
+      let row=0;
+      for(let x=0;x<cw;x++){
+        row+=gm[y*cw+x];
+        integral[(y+1)*stride+(x+1)]=integral[y*stride+(x+1)]+row;
+      }
+    }
+    const peaks=[];
+    const half=9;
+    for(let y=half;y<ch-half;y+=2) for(let x=half;x<cw-half;x+=2){
+      const xa=x-half, xb=x+half, ya=y-half, yb=y+half;
+      const sum=integral[yb*stride+xb]-integral[ya*stride+xb]-integral[yb*stride+xa]+integral[ya*stride+xa];
+      if(sum>=55) peaks.push([sum,x,y]);
+    }
+    peaks.sort((a,b)=>b[0]-a[0]);
+    const kept=[];
+    for(const [sum,x,y] of peaks){
+      if(kept.some(p=>Math.abs(p[0]-x)<22 && Math.abs(p[1]-y)<22)) continue;
+      kept.push([x,y]);
+      cand.push([x+x1,y+y1,gemType,sum]);
+      if(kept.length>=6) break;
+    }
+  }
+
   if(!cand.length) return [];
   const merged=[], used=Array(cand.length).fill(false);
   for(let i=0;i<cand.length;i++){
     if(used[i])continue; used[i]=true; const g=[cand[i]];
-    for(let j=i+1;j<cand.length;j++) if(!used[j]&&Math.abs(cand[i][0]-cand[j][0])<14&&Math.abs(cand[i][1]-cand[j][1])<14){used[j]=true;g.push(cand[j]);}
+    for(let j=i+1;j<cand.length;j++) if(!used[j]&&Math.abs(cand[i][0]-cand[j][0])<20&&Math.abs(cand[i][1]-cand[j][1])<20){used[j]=true;g.push(cand[j]);}
     g.sort((a,b)=>((b[2]!==NORMAL)-(a[2]!==NORMAL)) || b[3]-a[3]);
     merged.push([g.reduce((s,z)=>s+z[0],0)/g.length,g.reduce((s,z)=>s+z[1],0)/g.length,g[0][2]]);
   }
@@ -166,7 +202,8 @@ function solveScreenshot(dataUrl,blue,green,yellow){
         const id=x.getImageData(0,0,c.width,c.height);
         const board=detectBoard(id);
         const pieces=[0,1,2].map(i=>detectPiece(id,i));
-        if(pieces.some(p=>!p.length)) throw Error('Could not detect all 3 pieces. Take the capture after the pieces stop moving.');
+        const missing=pieces.map((p,i)=>p.length?null:PIECE_NAMES[i]).filter(Boolean);
+        if(missing.length) throw Error('Could not detect: '+missing.join(', ')+'. Keep the pieces fully visible and tap SOLVE again.');
         const current={[BLUE]:+blue||0,[GREEN]:+green||0,[YELLOW]:+yellow||0};
         const sol=solve(board,pieces,current);
         AndroidBridge.onSolved(JSON.stringify(solutionPayload(sol,pieces)));
