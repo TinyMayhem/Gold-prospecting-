@@ -11,75 +11,72 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 public class SolutionOverlayView extends View {
-    private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint stroke = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint card = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint title = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint coord = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint note = new Paint(Paint.ANTI_ALIAS_FLAG);
     private JSONArray moves;
     private String banner = "";
-
-    // Normalized from the user's 709x1536 screenshots.
-    private static final double BOARD_X0 = 128.0 / 709.0;
-    private static final double BOARD_Y0 = 529.0 / 1536.0;
-    private static final double BOARD_DX = 65.0 / 709.0;
-    private static final double BOARD_DY = 65.0 / 1536.0;
 
     public SolutionOverlayView(Context c) {
         super(c);
         setBackgroundColor(Color.TRANSPARENT);
-        fill.setColor(Color.argb(85, 255, 235, 59));
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(dp(3));
-        stroke.setColor(Color.WHITE);
-        text.setColor(Color.WHITE);
-        text.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        text.setTextAlign(Paint.Align.CENTER);
-        text.setTextSize(dp(24));
-        text.setShadowLayer(dp(4), 0, dp(2), Color.BLACK);
+        card.setColor(Color.argb(220, 38, 27, 22));
+        title.setColor(Color.WHITE);
+        title.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        title.setTextAlign(Paint.Align.CENTER);
+        title.setTextSize(dp(12));
+        coord.setColor(Color.WHITE);
+        coord.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        coord.setTextAlign(Paint.Align.CENTER);
+        coord.setTextSize(dp(16));
+        coord.setShadowLayer(dp(3), 0, dp(1), Color.BLACK);
+        note.setColor(Color.WHITE);
+        note.setTextAlign(Paint.Align.CENTER);
+        note.setTextSize(dp(10));
     }
 
-    public void setSolution(JSONArray m, String b) { moves = m; banner = b == null ? "" : b; invalidate(); }
+    public void setSolution(JSONArray m, String b) {
+        moves = m;
+        banner = b == null ? "" : b;
+        invalidate();
+    }
 
     @Override protected void onDraw(Canvas c) {
         super.onDraw(c);
         if (moves == null) return;
-        int w = getWidth(), h = getHeight();
-        try {
-            for (int i = 0; i < moves.length(); i++) {
-                JSONObject move = moves.getJSONObject(i);
-                JSONArray cells = move.getJSONArray("cells");
-                for (int j = 0; j < cells.length(); j++) {
-                    JSONArray rc = cells.getJSONArray(j);
-                    int r = move.getInt("row") + rc.getInt(0);
-                    int col = move.getInt("col") + rc.getInt(1);
-                    float cx = (float)((BOARD_X0 + col * BOARD_DX) * w);
-                    float cy = (float)((BOARD_Y0 + r * BOARD_DY) * h);
-                    float cw = (float)(BOARD_DX * w * .84);
-                    float ch = (float)(BOARD_DY * h * .84);
-                    RectF rect = new RectF(cx-cw/2, cy-ch/2, cx+cw/2, cy+ch/2);
-                    c.drawRoundRect(rect, dp(5), dp(5), fill);
-                    c.drawRoundRect(rect, dp(5), dp(5), stroke);
-                }
-                JSONArray first = cells.getJSONArray(0);
-                int rr = move.getInt("row") + first.getInt(0);
-                int cc = move.getInt("col") + first.getInt(1);
-                float tx = (float)((BOARD_X0 + cc * BOARD_DX) * w);
-                float ty = (float)((BOARD_Y0 + rr * BOARD_DY) * h + dp(8));
-                c.drawText(String.valueOf(i+1), tx, ty, text);
-            }
-        } catch (Exception ignored) {}
+        int w=getWidth(), h=getHeight();
 
-        if (!banner.isEmpty()) {
-            Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
-            bg.setColor(Color.argb(210, 30, 22, 18));
-            float pad = dp(12);
-            float top = h * .16f;
-            RectF r = new RectF(w*.08f, top, w*.92f, top + dp(50));
-            c.drawRoundRect(r, dp(12), dp(12), bg);
-            Paint bt = new Paint(text);
-            bt.setTextSize(dp(16));
-            c.drawText(banner, w/2f, top + dp(31), bt);
-        }
+        // V4 intentionally does NOT draw shapes on the board. Pixel-perfect board
+        // alignment varies slightly with Android capture/insets, while grid
+        // coordinates do not. Show each answer directly beneath its piece slot.
+        final float[] centers={0.242f,0.500f,0.758f};
+        final String[] names={"LEFT","MIDDLE","RIGHT"};
+        float cardY=h*0.812f;
+        float cardW=w*0.285f;
+        float cardH=dp(54);
+
+        try {
+            for(int slot=0;slot<3;slot++){
+                JSONObject found=null;
+                int order=0;
+                for(int i=0;i<moves.length();i++){
+                    JSONObject m=moves.getJSONObject(i);
+                    if(m.optInt("piece",-1)==slot){ found=m; order=i+1; break; }
+                }
+                float cx=w*centers[slot];
+                if(found==null) continue;
+                RectF r=new RectF(cx-cardW/2,cardY,cx+cardW/2,cardY+cardH);
+                c.drawRoundRect(r,dp(10),dp(10),card);
+                c.drawText(order+"  "+names[slot],cx,cardY+dp(18),title);
+                String xy="R"+(found.getInt("row")+1)+"  C"+(found.getInt("col")+1);
+                c.drawText(xy,cx,cardY+dp(42),coord);
+            }
+        } catch(Exception ignored) {}
+
+        // Small coordinate reminder, far enough below the pieces not to cover them.
+        c.drawText("R = top to bottom   •   C = left to right",w/2f,h*0.868f,note);
     }
 
-    private float dp(float x) { return x * getResources().getDisplayMetrics().density; }
+    private float dp(float x){ return x*getResources().getDisplayMetrics().density; }
 }

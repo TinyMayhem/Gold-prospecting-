@@ -88,28 +88,40 @@ function isValidPiece(p){
   return seen.size===set.size;
 }
 
+function classifyPieceCenter(rgb){
+  const [r,g,b]=rgb;
+  // Gem icon centers have very distinctive channel patterns in Last War.
+  if(b>140 && b>g+35 && b>r+50) return BLUE;
+  if(g>145 && g>r+35 && g>b+35) return GREEN;
+  if(r<225 && g<150 && b<100) return YELLOW;
+  return NORMAL;
+}
+
 function detectPiece(imgData,slot){
   const {data,width:w,height:h}=imgData;
   const x1=Math.floor(PIECE_X_RANGES[slot][0]*w), x2=Math.floor(PIECE_X_RANGES[slot][1]*w);
   const y1=Math.floor(PIECE_Y_RANGE[0]*h), y2=Math.floor(PIECE_Y_RANGE[1]*h);
   const cw=x2-x1, ch=y2-y1;
-  const mask=new Uint8Array(cw*ch);
 
-  // Primary detector: only accept pixels that look like an actual tile, not the
-  // orange panel/background. This prevents an empty slot from becoming a fake piece.
+  // V4: detect the actual bright 28-30 px tile squares. This is substantially
+  // more reliable than trying to infer pieces from gem colors. The brown slot
+  // background can be similar to normal/yellow tiles, but it never forms these
+  // isolated bright square components.
+  const mask=new Uint8Array(cw*ch);
   for(let y=0;y<ch;y++) for(let x=0;x<cw;x++){
     const rgb=getRgb(data,w,h,x+x1,y+y1);
-    const [t,d]=nearestType(rgb,false);
-    if(isStrongTilePixel(rgb,t,d)) mask[y*cw+x]=1;
+    if(Math.max(rgb[0],rgb[1],rgb[2])>205) mask[y*cw+x]=1;
   }
 
-  const seen=new Uint8Array(cw*ch), cand=[];
+  const seen=new Uint8Array(cw*ch), comps=[];
   const dirs=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
   for(let sy=0;sy<ch;sy++) for(let sx=0;sx<cw;sx++){
-    const sidx=sy*cw+sx; if(!mask[sidx]||seen[sidx]) continue;
-    const q=[[sx,sy]]; seen[sidx]=1; let qi=0,minx=sx,maxx=sx,miny=sy,maxy=sy; const pts=[];
+    const idx=sy*cw+sx;
+    if(!mask[idx] || seen[idx]) continue;
+    const q=[[sx,sy]]; seen[idx]=1; let qi=0;
+    let minx=sx,maxx=sx,miny=sy,maxy=sy,area=0,sumx=0,sumy=0;
     while(qi<q.length){
-      const [x,y]=q[qi++]; pts.push([x,y]);
+      const [x,y]=q[qi++]; area++; sumx+=x; sumy+=y;
       minx=Math.min(minx,x); maxx=Math.max(maxx,x); miny=Math.min(miny,y); maxy=Math.max(maxy,y);
       for(const [dx,dy] of dirs){
         const nx=x+dx,ny=y+dy;
@@ -118,86 +130,38 @@ function detectPiece(imgData,slot){
         if(mask[ni]&&!seen[ni]){seen[ni]=1;q.push([nx,ny]);}
       }
     }
-    const ww=maxx-minx+1, hh=maxy-miny+1, area=pts.length;
-    if(ww>=12&&ww<=42&&hh>=10&&hh<=42&&area>=28){
-      const cx=x1+(minx+maxx)/2, cy=y1+(miny+maxy)/2;
-      const rgbs=pts.map(([x,y])=>getRgb(data,w,h,x+x1,y+y1));
-      let t=nearestType(medianRgb(rgbs),false)[0];
-
-      // Re-check around the center. Gem icons can split a tile into several colors.
-      const centerPix=[];
-      for(let yy=-6;yy<=6;yy+=3) for(let xx=-6;xx<=6;xx+=3) centerPix.push(getRgb(data,w,h,cx+xx,cy+yy));
-      const ct=nearestType(medianRgb(centerPix),false)[0];
-      if(ct===BLUE || ct===GREEN) t=ct;
-      cand.push([cx,cy,t,area]);
+    const ww=maxx-minx+1, hh=maxy-miny+1;
+    // Real piece tiles are ~28-30 px on the user's 709x1536 capture.
+    // Scale the bounds for other resolutions while retaining generous tolerance.
+    const sxScale=w/709, syScale=h/1536;
+    if(ww>=18*sxScale && ww<=42*sxScale && hh>=17*syScale && hh<=42*syScale && area>=220*sxScale*syScale){
+      const cx=x1+sumx/area, cy=y1+sumy/area;
+      const samples=[];
+      for(let yy=-3;yy<=3;yy++) for(let xx=-3;xx<=3;xx++) samples.push(getRgb(data,w,h,cx+xx,cy+yy));
+      const type=classifyPieceCenter(medianRgb(samples));
+      comps.push([cx,cy,type,area]);
     }
   }
 
-  // Gem-only pieces sometimes fragment too much for the component detector.
-  // Blue and green are safe to recover by hue because the orange background cannot
-  // masquerade as either color. Do not use the old wide yellow fallback, which was
-  // responsible for phantom pieces in empty slots.
-  for(const gemType of [BLUE,GREEN]){
-    const gm=new Uint8Array(cw*ch);
-    for(let y=0;y<ch;y++) for(let x=0;x<cw;x++){
-      const rgb=getRgb(data,w,h,x+x1,y+y1);
-      const [t,d]=nearestType(rgb,false);
-      const hueOk = gemType===BLUE
-        ? (rgb[2]>rgb[0]+25 && rgb[2]>rgb[1]+12)
-        : (rgb[1]>rgb[0]+12 && rgb[1]>rgb[2]+4);
-      if(t===gemType && d<44 && hueOk) gm[y*cw+x]=1;
-    }
-    const stride=cw+1, integral=new Int32Array((cw+1)*(ch+1));
-    for(let y=0;y<ch;y++){
-      let row=0;
-      for(let x=0;x<cw;x++){
-        row+=gm[y*cw+x];
-        integral[(y+1)*stride+(x+1)]=integral[y*stride+(x+1)]+row;
-      }
-    }
-    const peaks=[], half=9;
-    for(let y=half;y<ch-half;y+=2) for(let x=half;x<cw-half;x+=2){
-      const xa=x-half, xb=x+half, ya=y-half, yb=y+half;
-      const sum=integral[yb*stride+xb]-integral[ya*stride+xb]-integral[yb*stride+xa]+integral[ya*stride+xa];
-      if(sum>=42) peaks.push([sum,x,y]);
-    }
-    peaks.sort((a,b)=>b[0]-a[0]);
-    const kept=[];
-    for(const [sum,x,y] of peaks){
-      if(kept.some(p=>Math.abs(p[0]-x)<23 && Math.abs(p[1]-y)<23)) continue;
-      kept.push([x,y]);
-      cand.push([x+x1,y+y1,gemType,sum]);
-      if(kept.length>=6) break;
-    }
+  if(!comps.length) return [];
+
+  // Remove duplicates if compression splits a tile into more than one candidate.
+  comps.sort((a,b)=>b[3]-a[3]);
+  const tiles=[];
+  for(const c of comps){
+    if(tiles.some(t=>Math.abs(t[0]-c[0])<18*w/709 && Math.abs(t[1]-c[1])<18*h/1536)) continue;
+    tiles.push(c);
   }
+  if(!tiles.length || tiles.length>6) return [];
 
-  if(!cand.length) return [];
-
-  const merged=[], used=Array(cand.length).fill(false);
-  for(let i=0;i<cand.length;i++){
-    if(used[i]) continue;
-    used[i]=true; const g=[cand[i]];
-    for(let j=i+1;j<cand.length;j++){
-      if(!used[j]&&Math.abs(cand[i][0]-cand[j][0])<19&&Math.abs(cand[i][1]-cand[j][1])<19){
-        used[j]=true; g.push(cand[j]);
-      }
-    }
-    g.sort((a,b)=>((b[2]!==NORMAL)-(a[2]!==NORMAL)) || b[3]-a[3]);
-    merged.push([
-      g.reduce((s,z)=>s+z[0],0)/g.length,
-      g.reduce((s,z)=>s+z[1],0)/g.length,
-      g[0][2]
-    ]);
-  }
-
-  const xs=cluster(merged.map(x=>x[0])), ys=cluster(merged.map(x=>x[1]));
+  const xs=cluster(tiles.map(x=>x[0]),12*w/709);
+  const ys=cluster(tiles.map(x=>x[1]),12*h/1536);
   const map=new Map();
-  for(const [x,y,t] of merged){
+  for(const [x,y,t] of tiles){
     let c=0,r=0;
     for(let i=1;i<xs.length;i++) if(Math.abs(x-xs[i])<Math.abs(x-xs[c])) c=i;
     for(let i=1;i<ys.length;i++) if(Math.abs(y-ys[i])<Math.abs(y-ys[r])) r=i;
-    const k=r+','+c, prev=map.get(k);
-    if(prev==null || (prev===NORMAL&&(t===BLUE||t===GREEN||t===YELLOW))) map.set(k,t);
+    map.set(r+','+c,t);
   }
   const p=normalizePiece([...map.entries()].map(([k,v])=>{
     const [r,c]=k.split(',').map(Number); return [r,c,v];
@@ -280,7 +244,7 @@ function solutionPayload(sol,pieces){
     rows:m.rows,
     cols:m.cols
   }));
-  const summary=moves.map((m,i)=>(i+1)+' '+m.pieceName).join('  •  ')+
+  const summary=moves.map((m,i)=>(i+1)+' '+m.pieceName+' R'+(m.row+1)+' C'+(m.col+1)).join('  |  ')+
     '   |   B '+sol.counts[BLUE]+'/5  G '+sol.counts[GREEN]+'/10  Y '+sol.counts[YELLOW]+'/5';
   return {
     ok:true,

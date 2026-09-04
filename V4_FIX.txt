@@ -1,0 +1,5 @@
+V4
+- Piece recognition now detects actual bright square tiles instead of guessing by gem color.
+- Tested against the supplied Gold Prospecting screenshots, including empty piece slots.
+- Removed board placement outlines.
+- Displays order + R/C coordinate beneath LEFT, MIDDLE, RIGHT piece slots.
