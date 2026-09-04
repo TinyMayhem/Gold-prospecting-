@@ -8,9 +8,23 @@ const PIECE_NAMES=['LEFT','MIDDLE','RIGHT'];
 const SYMBOLS=['·','■','B','G','Y'];
 const CLASSNAMES=['empty','normal','blue','green','yellow'];
 
-const BOARD_X0=128/709, BOARD_Y0=529/1536, BOARD_DX=65/709, BOARD_DY=65/1536;
-const PIECE_X_RANGES=[[100/709,245/709],[285/709,440/709],[475/709,620/709]];
-const PIECE_Y_RANGE=[1060/1536,1250/1536];
+const DEFAULT_CAL={
+  board:{left:95.5/709,top:496.5/1536,right:615.5/709,bottom:1016.5/1536},
+  slots:[
+    {left:100/709,top:1060/1536,right:245/709,bottom:1250/1536},
+    {left:285/709,top:1060/1536,right:440/709,bottom:1250/1536},
+    {left:475/709,top:1060/1536,right:620/709,bottom:1250/1536}
+  ]
+};
+function normalizeCal(cal){
+  try{
+    if(typeof cal==='string') cal=JSON.parse(cal);
+    if(!cal||!cal.board||!Array.isArray(cal.slots)||cal.slots.length<3) return DEFAULT_CAL;
+    const good=r=>r&&Number.isFinite(+r.left)&&Number.isFinite(+r.top)&&Number.isFinite(+r.right)&&Number.isFinite(+r.bottom)&&+r.right>+r.left&&+r.bottom>+r.top;
+    if(!good(cal.board)||!cal.slots.slice(0,3).every(good)) return DEFAULT_CAL;
+    return {board:{left:+cal.board.left,top:+cal.board.top,right:+cal.board.right,bottom:+cal.board.bottom},slots:cal.slots.slice(0,3).map(r=>({left:+r.left,top:+r.top,right:+r.right,bottom:+r.bottom}))};
+  }catch(e){return DEFAULT_CAL;}
+}
 const PROTO_RGB={
   [EMPTY]:[96,76,73],
   [NORMAL]:[239,174,109],
@@ -42,17 +56,23 @@ function median(vals){ if(!vals.length) return 0; vals=[...vals].sort((a,b)=>a-b
 function medianRgb(list){return [0,1,2].map(i=>median(list.map(x=>x[i])));}
 function getRgb(data,w,h,x,y){x=clamp(Math.round(x),0,w-1); y=clamp(Math.round(y),0,h-1); const i=(y*w+x)*4; return [data[i],data[i+1],data[i+2]];}
 
-function classifyBoardCell(data,w,h,cx,cy){
+function classifyBoardCell(data,w,h,cx,cy,cellW,cellH){
   const samples=[];
-  for(const [dx,dy] of [[-15,-15],[15,-15],[-15,15],[15,15]]){
-    const pix=[]; for(let yy=-2;yy<=2;yy++) for(let xx=-2;xx<=2;xx++) pix.push(getRgb(data,w,h,cx+dx+xx,cy+dy+yy));
+  const ox=Math.max(6,cellW*0.23), oy=Math.max(6,cellH*0.23);
+  const rad=Math.max(1,Math.min(3,Math.round(Math.min(cellW,cellH)*0.04)));
+  for(const [dx,dy] of [[-ox,-oy],[ox,-oy],[-ox,oy],[ox,oy]]){
+    const pix=[]; for(let yy=-rad;yy<=rad;yy++) for(let xx=-rad;xx<=rad;xx++) pix.push(getRgb(data,w,h,cx+dx+xx,cy+dy+yy));
     samples.push(medianRgb(pix));
   }
   return nearestType(medianRgb(samples),true)[0];
 }
-function detectBoard(imgData){
+function detectBoard(imgData,cal){
   const {data,width:w,height:h}=imgData; const b=Array.from({length:8},()=>Array(8).fill(0));
-  for(let r=0;r<8;r++) for(let c=0;c<8;c++) b[r][c]=classifyBoardCell(data,w,h,BOARD_X0*w+c*BOARD_DX*w,BOARD_Y0*h+r*BOARD_DY*h);
+  const r=cal.board, left=r.left*w, top=r.top*h, cw=(r.right-r.left)*w/8, ch=(r.bottom-r.top)*h/8;
+  for(let row=0;row<8;row++) for(let col=0;col<8;col++){
+    const cx=left+(col+0.5)*cw, cy=top+(row+0.5)*ch;
+    b[row][col]=classifyBoardCell(data,w,h,cx,cy,cw,ch);
+  }
   return b;
 }
 
@@ -97,10 +117,11 @@ function classifyPieceCenter(rgb){
   return NORMAL;
 }
 
-function detectPiece(imgData,slot){
+function detectPiece(imgData,slot,cal){
   const {data,width:w,height:h}=imgData;
-  const x1=Math.floor(PIECE_X_RANGES[slot][0]*w), x2=Math.floor(PIECE_X_RANGES[slot][1]*w);
-  const y1=Math.floor(PIECE_Y_RANGE[0]*h), y2=Math.floor(PIECE_Y_RANGE[1]*h);
+  const sr=cal.slots[slot];
+  const x1=Math.floor(sr.left*w), x2=Math.floor(sr.right*w);
+  const y1=Math.floor(sr.top*h), y2=Math.floor(sr.bottom*h);
   const cw=x2-x1, ch=y2-y1;
 
   // V4: detect the actual bright 28-30 px tile squares. This is substantially
@@ -240,6 +261,7 @@ function solutionPayload(sol,pieces){
     row:m.row,
     col:m.col,
     cells:normalizePiece(pieces[m.piece]).map(z=>[z[0],z[1]]),
+    typedCells:normalizePiece(pieces[m.piece]).map(z=>[z[0],z[1],z[2]]),
     gained:{blue:m.gained[BLUE]||0,green:m.gained[GREEN]||0,yellow:m.gained[YELLOW]||0},
     rows:m.rows,
     cols:m.cols
@@ -255,7 +277,7 @@ function solutionPayload(sol,pieces){
   };
 }
 
-function solveScreenshot(dataUrl,blue,green,yellow){
+function solveScreenshot(dataUrl,blue,green,yellow,calibration){
   try{
     const img=new Image();
     img.onload=()=>{
@@ -265,8 +287,9 @@ function solveScreenshot(dataUrl,blue,green,yellow){
         const x=c.getContext('2d',{willReadFrequently:true});
         x.drawImage(img,0,0);
         const id=x.getImageData(0,0,c.width,c.height);
-        const board=detectBoard(id);
-        const pieces=[0,1,2].map(i=>detectPiece(id,i));
+        const cal=normalizeCal(calibration);
+        const board=detectBoard(id,cal);
+        const pieces=[0,1,2].map(i=>detectPiece(id,i,cal));
         const visible=pieces.map((p,i)=>p.length?PIECE_NAMES[i]:null).filter(Boolean);
         if(!visible.length) throw Error('Could not detect any pieces. Wait until the pieces are fully visible and tap SOLVE again.');
         const current={[BLUE]:+blue||0,[GREEN]:+green||0,[YELLOW]:+yellow||0};

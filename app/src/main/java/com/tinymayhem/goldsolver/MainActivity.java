@@ -18,15 +18,17 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
-import android.widget.TextView;
 import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
 
 public class MainActivity extends Activity {
     private static final int REQ_CAPTURE = 9001;
     private static final int REQ_NOTIFY = 9002;
+    private static final int REQ_CALIBRATION_IMAGE = 9003;
     private EditText blueInput, greenInput, yellowInput;
     private SharedPreferences prefs;
+    private TextView calibrationStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -34,6 +36,12 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences("gold_solver", MODE_PRIVATE);
         setContentView(buildUi());
         loadCounts();
+        updateCalibrationStatus();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (calibrationStatus != null) updateCalibrationStatus();
     }
 
     private View buildUi() {
@@ -43,14 +51,14 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(Color.rgb(248, 238, 218));
 
         TextView title = new TextView(this);
-        title.setText("Gold Prospecting Solver");
+        title.setText("Gold Prospecting Solver V5");
         title.setTextSize(28);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setTextColor(Color.rgb(55, 35, 25));
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Floating read-only solver for Last War. It never taps or drags pieces for you.");
+        sub.setText("Calibrated floating overlay for Last War. It only reads the screen and never taps or drags pieces.");
         sub.setTextSize(15);
         sub.setTextColor(Color.DKGRAY);
         sub.setPadding(0, dp(8), 0, dp(18));
@@ -65,9 +73,9 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        blueInput = countBox("Blue", 5);
-        greenInput = countBox("Green", 10);
-        yellowInput = countBox("Yellow", 5);
+        blueInput = countBox(5);
+        greenInput = countBox(10);
+        yellowInput = countBox(5);
         row.addView(wrapField("Blue /5", blueInput), new LinearLayout.LayoutParams(0, -2, 1));
         row.addView(wrapField("Green /10", greenInput), new LinearLayout.LayoutParams(0, -2, 1));
         row.addView(wrapField("Yellow /5", yellowInput), new LinearLayout.LayoutParams(0, -2, 1));
@@ -84,6 +92,36 @@ public class MainActivity extends Activity {
         });
         root.addView(reset);
 
+        TextView calTitle = new TextView(this);
+        calTitle.setText("\nScreen calibration");
+        calTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        calTitle.setTextSize(18);
+        root.addView(calTitle);
+
+        calibrationStatus = new TextView(this);
+        calibrationStatus.setTextSize(14);
+        calibrationStatus.setTextColor(Color.rgb(65,48,40));
+        calibrationStatus.setPadding(0, dp(4), 0, dp(4));
+        root.addView(calibrationStatus);
+
+        Button calibrate = button("Calibrate overlay from screenshot");
+        calibrate.setOnClickListener(v -> chooseCalibrationScreenshot());
+        root.addView(calibrate);
+
+        Button resetCal = button("Reset calibration to default");
+        resetCal.setOnClickListener(v -> {
+            CalibrationPrefs.reset(prefs);
+            updateCalibrationStatus();
+            Toast.makeText(this, "Calibration reset", Toast.LENGTH_SHORT).show();
+        });
+        root.addView(resetCal);
+
+        TextView startTitle = new TextView(this);
+        startTitle.setText("\nStart solver");
+        startTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        startTitle.setTextSize(18);
+        root.addView(startTitle);
+
         Button overlay = button("1. Allow floating overlay");
         overlay.setOnClickListener(v -> requestOverlay());
         root.addView(overlay);
@@ -97,7 +135,18 @@ public class MainActivity extends Activity {
         root.addView(stop);
 
         TextView help = new TextView(this);
-        help.setText("How to use\n\n1. Reset totals when a fresh Gold Prospecting round begins.\n2. Tap Start SOLVE bubble and approve screen capture.\n3. Open Last War.\n4. When all three pieces are visible, tap the floating SOLVE button.\n5. Numbered placements appear over the board. Place 1, then 2, then 3.\n6. Tap SOLVE again for the next batch. The app carries the expected gem totals forward automatically.\n\nLong-press the SOLVE bubble to return here.");
+        help.setText("How to use\n\n" +
+                "CALIBRATE ONCE:\n" +
+                "1. Take a screenshot while Gold Prospecting is fully visible.\n" +
+                "2. Tap Calibrate overlay from screenshot and choose it.\n" +
+                "3. Drag the 8x8 grid onto the board and line up the three piece boxes. Save.\n\n" +
+                "PLAY:\n" +
+                "1. Reset totals when a fresh round begins.\n" +
+                "2. Start the SOLVE bubble and approve screen capture.\n" +
+                "3. In Last War, tap SOLVE after the pieces stop moving.\n" +
+                "4. The exact piece shapes are highlighted on the board. Coordinate cards below the pieces remain as a backup.\n" +
+                "5. Long-press SOLVE to return here.\n\n" +
+                "If the highlighted shape does not match the real piece, do not place it. Recalibrate the piece boxes or capture after the animation stops.");
         help.setTextSize(15);
         help.setTextColor(Color.rgb(65, 48, 40));
         help.setPadding(0, dp(20), 0, 0);
@@ -108,7 +157,7 @@ public class MainActivity extends Activity {
         return scroll;
     }
 
-    private EditText countBox(String name, int max) {
+    private EditText countBox(int max) {
         EditText e = new EditText(this);
         e.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         e.setText("0");
@@ -140,6 +189,20 @@ public class MainActivity extends Activity {
         return b;
     }
 
+    private void updateCalibrationStatus() {
+        if (calibrationStatus == null) return;
+        calibrationStatus.setText(CalibrationPrefs.isCalibrated(prefs)
+                ? "Custom calibration saved ✓"
+                : "Using default calibration. Calibrate once on this phone for accurate overlays.");
+    }
+
+    private void chooseCalibrationScreenshot() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("image/*");
+        startActivityForResult(i, REQ_CALIBRATION_IMAGE);
+    }
+
     private void requestOverlay() {
         if (Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Overlay permission is already allowed", Toast.LENGTH_SHORT).show();
@@ -166,6 +229,18 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_CALIBRATION_IMAGE && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri uri = data.getData();
+            try {
+                int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                getContentResolver().takePersistableUriPermission(uri, flags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {}
+            Intent c = new Intent(this, CalibrationActivity.class);
+            c.setData(uri);
+            c.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(c);
+            return;
+        }
         if (requestCode == REQ_CAPTURE && resultCode == RESULT_OK && data != null) {
             Intent s = new Intent(this, CaptureOverlayService.class);
             s.putExtra("resultCode", resultCode);

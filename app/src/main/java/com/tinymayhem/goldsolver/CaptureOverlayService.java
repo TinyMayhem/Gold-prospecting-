@@ -12,6 +12,7 @@ import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.*;
 import android.util.Base64;
+import android.util.DisplayMetrics;
 import android.view.*;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
@@ -45,7 +46,7 @@ public class CaptureOverlayService extends Service {
         prefs = getSharedPreferences("gold_solver", MODE_PRIVATE);
         wm = (WindowManager)getSystemService(WINDOW_SERVICE);
         createChannel();
-        startForeground(42, notification("Solver ready"));
+        startForeground(42, notification("Solver V5 ready"));
         createBubble();
         createHiddenWebView();
     }
@@ -69,9 +70,15 @@ public class CaptureOverlayService extends Service {
             @Override public void onStop() { main.post(() -> stopSelf()); }
         }, main);
 
-        WindowMetrics metrics = wm.getMaximumWindowMetrics();
-        Rect bounds = metrics.getBounds();
-        width = bounds.width(); height = bounds.height();
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowMetrics metrics = wm.getMaximumWindowMetrics();
+            Rect bounds = metrics.getBounds();
+            width = bounds.width(); height = bounds.height();
+        } else {
+            DisplayMetrics dm = new DisplayMetrics();
+            wm.getDefaultDisplay().getRealMetrics(dm);
+            width = dm.widthPixels; height = dm.heightPixels;
+        }
         density = getResources().getDisplayMetrics().densityDpi;
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3);
         virtualDisplay = projection.createVirtualDisplay("GoldSolverCapture", width, height, density,
@@ -165,10 +172,11 @@ public class CaptureOverlayService extends Service {
             }
             Bitmap bmp = imageToBitmap(image);
             ByteArrayOutputStream out = new ByteArrayOutputStream();
-            bmp.compress(Bitmap.CompressFormat.JPEG, 88, out);
+            bmp.compress(Bitmap.CompressFormat.JPEG, 90, out);
             String b64 = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
             int b = prefs.getInt("blue",0), g=prefs.getInt("green",0), y=prefs.getInt("yellow",0);
-            String js = "solveScreenshot('data:image/jpeg;base64," + b64 + "',"+b+","+g+","+y+")";
+            String cal = CalibrationPrefs.toJson(prefs).toString();
+            String js = "solveScreenshot('data:image/jpeg;base64," + b64 + "',"+b+","+g+","+y+","+cal+")";
             web.evaluateJavascript(js, null);
             bmp.recycle();
         } catch (Throwable t) {
@@ -201,7 +209,7 @@ public class CaptureOverlayService extends Service {
             String banner = obj.optString("summary", "Solution ready");
 
             if (solutionView == null) {
-                solutionView = new SolutionOverlayView(this);
+                solutionView = new SolutionOverlayView(this, prefs);
                 WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
                         WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                         WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -263,7 +271,7 @@ public class CaptureOverlayService extends Service {
         PendingIntent pi = PendingIntent.getActivity(this, 0, open,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, CHANNEL) : new Notification.Builder(this);
-        return b.setSmallIcon(android.R.drawable.ic_menu_search).setContentTitle("Gold Prospecting Solver")
+        return b.setSmallIcon(android.R.drawable.ic_menu_search).setContentTitle("Gold Prospecting Solver V5")
                 .setContentText(text).setContentIntent(pi).setOngoing(true).build();
     }
 

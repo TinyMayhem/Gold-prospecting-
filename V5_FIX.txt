@@ -1,0 +1,17 @@
+V5 CALIBRATED OVERLAY
+
+What changed:
+- Added one-time screenshot calibration.
+- Drag an 8x8 grid onto the exact game board.
+- Calibrate LEFT, MIDDLE, and RIGHT piece detection boxes.
+- Solver uses the saved calibration for both reading the screenshot and drawing the overlay.
+- Board overlay is back and uses the exact detected piece shape.
+- Coordinate cards remain under each piece as a backup.
+- Coordinate cards include a miniature color preview of the detected piece so you can verify the logic before moving it.
+
+Recommended test:
+1. Open a fresh Gold Prospecting board and take a screenshot after all 3 pieces stop moving.
+2. Open Solver V5 > Calibrate overlay from screenshot.
+3. Align the board grid and the 3 piece boxes, then Save calibration.
+4. Start SOLVE bubble, return to Last War, tap SOLVE.
+5. Before moving, confirm the small piece preview under each slot matches the real piece.
