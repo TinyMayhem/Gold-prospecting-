@@ -1,0 +1,184 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"></head><body><script>
+
+'use strict';
+
+const EMPTY=0, NORMAL=1, BLUE=2, GREEN=3, YELLOW=4;
+const TARGETS={[BLUE]:5,[GREEN]:10,[YELLOW]:5};
+const PIECE_NAMES=['LEFT','MIDDLE','RIGHT'];
+const SYMBOLS=['·','■','B','G','Y'];
+const CLASSNAMES=['empty','normal','blue','green','yellow'];
+
+const BOARD_X0=128/709, BOARD_Y0=529/1536, BOARD_DX=65/709, BOARD_DY=65/1536;
+const PIECE_X_RANGES=[[100/709,245/709],[285/709,440/709],[475/709,620/709]];
+const PIECE_Y_RANGE=[1095/1536,1230/1536];
+const PROTO_RGB={
+  [EMPTY]:[96,76,73],
+  [NORMAL]:[239,174,109],
+  [BLUE]:[64,153,218],
+  [GREEN]:[125,185,125],
+  [YELLOW]:[231,184,119]
+};
+
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function srgbToLinear(v){v/=255; return v<=0.04045?v/12.92:Math.pow((v+0.055)/1.055,2.4);}
+function rgbToLab(rgb){
+  const r=srgbToLinear(rgb[0]), g=srgbToLinear(rgb[1]), b=srgbToLinear(rgb[2]);
+  let x=(r*0.4124564+g*0.3575761+b*0.1804375)/0.95047;
+  let y=(r*0.2126729+g*0.7151522+b*0.0721750)/1.00000;
+  let z=(r*0.0193339+g*0.1191920+b*0.9503041)/1.08883;
+  const f=t=>t>0.008856?Math.cbrt(t):(7.787*t+16/116);
+  x=f(x); y=f(y); z=f(z);
+  return [116*y-16,500*(x-y),200*(y-z)];
+}
+const PROTO_LAB={}; for(const k of Object.keys(PROTO_RGB)) PROTO_LAB[k]=rgbToLab(PROTO_RGB[k]);
+function labDist(a,b){return Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2]);}
+function nearestType(rgb, includeEmpty=true){
+  const lab=rgbToLab(rgb); const keys=includeEmpty?[EMPTY,NORMAL,BLUE,GREEN,YELLOW]:[NORMAL,BLUE,GREEN,YELLOW];
+  let best=keys[0], bd=1e9;
+  for(const k of keys){const d=labDist(lab,PROTO_LAB[k]); if(d<bd){bd=d; best=k;}}
+  return [best,bd];
+}
+function median(vals){ if(!vals.length) return 0; vals=[...vals].sort((a,b)=>a-b); const m=vals.length>>1; return vals.length%2?vals[m]:(vals[m-1]+vals[m])/2; }
+function medianRgb(list){return [0,1,2].map(i=>median(list.map(x=>x[i])));}
+function getRgb(data,w,h,x,y){x=clamp(Math.round(x),0,w-1); y=clamp(Math.round(y),0,h-1); const i=(y*w+x)*4; return [data[i],data[i+1],data[i+2]];}
+
+function classifyBoardCell(data,w,h,cx,cy){
+  const samples=[];
+  for(const [dx,dy] of [[-15,-15],[15,-15],[-15,15],[15,15]]){
+    const pix=[]; for(let yy=-2;yy<=2;yy++) for(let xx=-2;xx<=2;xx++) pix.push(getRgb(data,w,h,cx+dx+xx,cy+dy+yy));
+    samples.push(medianRgb(pix));
+  }
+  return nearestType(medianRgb(samples),true)[0];
+}
+function detectBoard(imgData){
+  const {data,width:w,height:h}=imgData; const b=Array.from({length:8},()=>Array(8).fill(0));
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++) b[r][c]=classifyBoardCell(data,w,h,BOARD_X0*w+c*BOARD_DX*w,BOARD_Y0*h+r*BOARD_DY*h);
+  return b;
+}
+
+function cluster(values,tol=13){
+  values=[...values].sort((a,b)=>a-b); const groups=[];
+  for(const v of values){ if(!groups.length || v-(groups[groups.length-1].reduce((a,b)=>a+b,0)/groups[groups.length-1].length)>tol) groups.push([v]); else groups[groups.length-1].push(v); }
+  return groups.map(g=>g.reduce((a,b)=>a+b,0)/g.length);
+}
+
+function detectPiece(imgData,slot){
+  const {data,width:w,height:h}=imgData;
+  const x1=Math.floor(PIECE_X_RANGES[slot][0]*w), x2=Math.floor(PIECE_X_RANGES[slot][1]*w);
+  const y1=Math.floor(PIECE_Y_RANGE[0]*h), y2=Math.floor(PIECE_Y_RANGE[1]*h);
+  const cw=x2-x1, ch=y2-y1;
+  const mask=new Uint8Array(cw*ch), typeMap=new Uint8Array(cw*ch);
+  for(let y=0;y<ch;y++) for(let x=0;x<cw;x++){
+    const rgb=getRgb(data,w,h,x+x1,y+y1); const [t,d]=nearestType(rgb,false); const idx=y*cw+x;
+    if(d<18){mask[idx]=1; typeMap[idx]=t;}
+  }
+  const seen=new Uint8Array(cw*ch), cand=[]; const dirs=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
+  for(let sy=0;sy<ch;sy++) for(let sx=0;sx<cw;sx++){
+    const sidx=sy*cw+sx; if(!mask[sidx]||seen[sidx]) continue;
+    const q=[[sx,sy]]; seen[sidx]=1; let qi=0,minx=sx,maxx=sx,miny=sy,maxy=sy; const pts=[];
+    while(qi<q.length){const [x,y]=q[qi++]; pts.push([x,y]); minx=Math.min(minx,x);maxx=Math.max(maxx,x);miny=Math.min(miny,y);maxy=Math.max(maxy,y);
+      for(const [dx,dy] of dirs){const nx=x+dx,ny=y+dy;if(nx<0||nx>=cw||ny<0||ny>=ch)continue;const ni=ny*cw+nx;if(mask[ni]&&!seen[ni]){seen[ni]=1;q.push([nx,ny]);}}
+    }
+    const ww=maxx-minx+1, hh=maxy-miny+1, area=pts.length;
+    if(ww>=14&&ww<=42&&hh>=10&&hh<=42&&area>=35){
+      const rgbs=pts.map(([x,y])=>getRgb(data,w,h,x+x1,y+y1));
+      const t=nearestType(medianRgb(rgbs),false)[0];
+      cand.push([x1+(minx+maxx)/2,y1+(miny+maxy)/2,t,area]);
+    }
+  }
+  if(!cand.length) return [];
+  const merged=[], used=Array(cand.length).fill(false);
+  for(let i=0;i<cand.length;i++){
+    if(used[i])continue; used[i]=true; const g=[cand[i]];
+    for(let j=i+1;j<cand.length;j++) if(!used[j]&&Math.abs(cand[i][0]-cand[j][0])<14&&Math.abs(cand[i][1]-cand[j][1])<14){used[j]=true;g.push(cand[j]);}
+    g.sort((a,b)=>((b[2]!==NORMAL)-(a[2]!==NORMAL)) || b[3]-a[3]);
+    merged.push([g.reduce((s,z)=>s+z[0],0)/g.length,g.reduce((s,z)=>s+z[1],0)/g.length,g[0][2]]);
+  }
+  const xs=cluster(merged.map(x=>x[0])), ys=cluster(merged.map(x=>x[1])); const map=new Map();
+  for(const [x,y,t] of merged){
+    let c=0,r=0; for(let i=1;i<xs.length;i++)if(Math.abs(x-xs[i])<Math.abs(x-xs[c]))c=i; for(let i=1;i<ys.length;i++)if(Math.abs(y-ys[i])<Math.abs(y-ys[r]))r=i;
+    const k=r+','+c; const prev=map.get(k); if(prev==null||(prev===NORMAL&&t!==NORMAL))map.set(k,t);
+  }
+  return normalizePiece([...map.entries()].map(([k,v])=>{const [r,c]=k.split(',').map(Number);return [r,c,v];}));
+}
+
+function normalizePiece(p){if(!p.length)return[];const mr=Math.min(...p.map(x=>x[0])),mc=Math.min(...p.map(x=>x[1]));return p.map(([r,c,v])=>[r-mr,c-mc,v]).sort((a,b)=>a[0]-b[0]||a[1]-b[1]);}
+function cloneBoard(b){return b.map(r=>r.slice());}
+function* legalPositions(board,piece){piece=normalizePiece(piece);const maxr=Math.max(...piece.map(x=>x[0])),maxc=Math.max(...piece.map(x=>x[1]));for(let top=0;top<8-maxr;top++)for(let left=0;left<8-maxc;left++)if(piece.every(([r,c])=>board[top+r][left+c]===EMPTY))yield[top,left];}
+function placeAndClear(board,piece,top,left){
+  const out=cloneBoard(board); for(const [r,c,v] of normalizePiece(piece)){if(out[top+r][left+c]!==EMPTY)throw Error('illegal');out[top+r][left+c]=v;}
+  const rows=[],cols=[]; for(let r=0;r<8;r++)if(out[r].every(v=>v!==EMPTY))rows.push(r); for(let c=0;c<8;c++)if(out.every(row=>row[c]!==EMPTY))cols.push(c);
+  const cells=new Set(); for(const r of rows)for(let c=0;c<8;c++)cells.add(r+','+c); for(const c of cols)for(let r=0;r<8;r++)cells.add(r+','+c);
+  const gained={[BLUE]:0,[GREEN]:0,[YELLOW]:0}; for(const s of cells){const [r,c]=s.split(',').map(Number),v=out[r][c];if(gained[v]!=null)gained[v]++;out[r][c]=EMPTY;}
+  return {board:out,gained,rows,cols};
+}
+function addCounts(counts,g){const n={};for(const k of [BLUE,GREEN,YELLOW])n[k]=Math.min(TARGETS[k],(counts[k]||0)+(g[k]||0));return n;}
+function complete(c){return [BLUE,GREEN,YELLOW].every(k=>(c[k]||0)>=TARGETS[k]);}
+function quality(b){const empty=b.flat().filter(x=>x===EMPTY).length;const rf=b.map(r=>r.filter(x=>x!==EMPTY).length),cf=Array.from({length:8},(_,c)=>b.filter(r=>r[c]!==EMPTY).length);const near=rf.filter(x=>x===7).length+cf.filter(x=>x===7).length;const blocked=rf.filter(x=>x>=5).length+cf.filter(x=>x>=5).length;return[empty,near,-blocked];}
+function cmpScore(a,b){for(let i=0;i<a.length;i++){if(a[i]!==b[i])return a[i]-b[i];}return 0;}
+function score(initial,counts,b,moves){const im=[BLUE,GREEN,YELLOW].reduce((s,k)=>s+Math.max(0,TARGETS[k]-(initial[k]||0)),0),tm=[BLUE,GREEN,YELLOW].reduce((s,k)=>s+Math.max(0,TARGETS[k]-(counts[k]||0)),0),lines=moves.reduce((s,m)=>s+m.rows.length+m.cols.length,0);return[im-tm,-tm,lines,...quality(b)];}
+function permutations3(){return[[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];}
+function solve(board,pieces,current){
+  pieces=pieces.map(normalizePiece); if(pieces.length!==3||pieces.some(p=>!p.length))throw Error('Could not detect all three pieces'); let best=null, completed=[];
+  function consider(b,c,m){const sc=score(current,c,b,m),sol={moves:m.slice(),board:cloneBoard(b),counts:{...c},completed:complete(c),score:sc};if(sol.completed)completed.push(sol);if(!best||cmpScore(sol.score,best.score)>0)best=sol;}
+  for(const order of permutations3()){
+    function dfs(depth,b,c,m){if(complete(c)||depth===3){consider(b,c,m);return;}const pi=order[depth],p=pieces[pi];let any=false;for(const [top,left] of legalPositions(b,p)){any=true;const x=placeAndClear(b,p,top,left),nc=addCounts(c,x.gained);dfs(depth+1,x.board,nc,m.concat([{piece:pi,row:top,col:left,gained:x.gained,rows:x.rows,cols:x.cols}]));}if(!any)consider(b,c,m);}
+    dfs(0,board,current,[]);
+  }
+  if(completed.length){const min=Math.min(...completed.map(s=>s.moves.length));return completed.filter(s=>s.moves.length===min).sort((a,b)=>cmpScore(b.score,a.score))[0];}
+  return best;
+}
+
+
+function pieceName(i){ return PIECE_NAMES[i] || ('PIECE '+(i+1)); }
+
+function solutionPayload(sol,pieces){
+  const moves=sol.moves.map((m,idx)=>({
+    piece:m.piece,
+    pieceName:pieceName(m.piece),
+    row:m.row,
+    col:m.col,
+    cells:normalizePiece(pieces[m.piece]).map(z=>[z[0],z[1]]),
+    gained:{blue:m.gained[BLUE]||0,green:m.gained[GREEN]||0,yellow:m.gained[YELLOW]||0},
+    rows:m.rows,
+    cols:m.cols
+  }));
+  const summary=moves.map((m,i)=>(i+1)+' '+m.pieceName).join('  •  ')+
+    '   |   B '+sol.counts[BLUE]+'/5  G '+sol.counts[GREEN]+'/10  Y '+sol.counts[YELLOW]+'/5';
+  return {
+    ok:true,
+    moves,
+    counts:{blue:sol.counts[BLUE],green:sol.counts[GREEN],yellow:sol.counts[YELLOW]},
+    completed:sol.completed,
+    summary
+  };
+}
+
+function solveScreenshot(dataUrl,blue,green,yellow){
+  try{
+    const img=new Image();
+    img.onload=()=>{
+      try{
+        const c=document.createElement('canvas');
+        c.width=img.naturalWidth; c.height=img.naturalHeight;
+        const x=c.getContext('2d',{willReadFrequently:true});
+        x.drawImage(img,0,0);
+        const id=x.getImageData(0,0,c.width,c.height);
+        const board=detectBoard(id);
+        const pieces=[0,1,2].map(i=>detectPiece(id,i));
+        if(pieces.some(p=>!p.length)) throw Error('Could not detect all 3 pieces. Take the capture after the pieces stop moving.');
+        const current={[BLUE]:+blue||0,[GREEN]:+green||0,[YELLOW]:+yellow||0};
+        const sol=solve(board,pieces,current);
+        AndroidBridge.onSolved(JSON.stringify(solutionPayload(sol,pieces)));
+      }catch(e){
+        AndroidBridge.onSolved(JSON.stringify({ok:false,error:String(e&&e.message?e.message:e)}));
+      }
+    };
+    img.onerror=()=>AndroidBridge.onSolved(JSON.stringify({ok:false,error:'Could not decode screen capture'}));
+    img.src=dataUrl;
+  }catch(e){
+    AndroidBridge.onSolved(JSON.stringify({ok:false,error:String(e&&e.message?e.message:e)}));
+  }
+}
+
+</script></body></html>
