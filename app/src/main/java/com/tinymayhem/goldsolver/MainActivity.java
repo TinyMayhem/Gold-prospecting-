@@ -13,6 +13,9 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -197,10 +200,28 @@ public class MainActivity extends Activity {
     }
 
     private void chooseCalibrationScreenshot() {
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        // GET_CONTENT is more reliable across Samsung Gallery / My Files providers.
+        // We immediately copy the selected image into our own cache, so the
+        // calibration screen never depends on a temporary content-URI grant.
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);
         i.setType("image/*");
-        startActivityForResult(i, REQ_CALIBRATION_IMAGE);
+        startActivityForResult(Intent.createChooser(i, "Choose Gold Prospecting screenshot"), REQ_CALIBRATION_IMAGE);
+    }
+
+    private String copyCalibrationImageToCache(Uri uri) {
+        File out = new File(getCacheDir(), "gold_calibration_source.img");
+        try (InputStream in = getContentResolver().openInputStream(uri);
+             FileOutputStream fos = new FileOutputStream(out, false)) {
+            if (in == null) return null;
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) fos.write(buf, 0, n);
+            fos.flush();
+            return out.getAbsolutePath();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void requestOverlay() {
@@ -230,15 +251,18 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_CALIBRATION_IMAGE && resultCode == RESULT_OK && data != null && data.getData() != null) {
-            Uri uri = data.getData();
-            try {
-                int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-                getContentResolver().takePersistableUriPermission(uri, flags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            } catch (Exception ignored) {}
+            String cachedPath = copyCalibrationImageToCache(data.getData());
+            if (cachedPath == null) {
+                Toast.makeText(this, "Could not copy that screenshot. Try choosing it from Gallery or My Files.", Toast.LENGTH_LONG).show();
+                return;
+            }
             Intent c = new Intent(this, CalibrationActivity.class);
-            c.setData(uri);
-            c.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            startActivity(c);
+            c.putExtra("imagePath", cachedPath);
+            try {
+                startActivity(c);
+            } catch (Exception e) {
+                Toast.makeText(this, "Could not open calibration screen: " + e.getClass().getSimpleName(), Toast.LENGTH_LONG).show();
+            }
             return;
         }
         if (requestCode == REQ_CAPTURE && resultCode == RESULT_OK && data != null) {

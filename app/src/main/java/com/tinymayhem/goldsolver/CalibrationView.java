@@ -31,7 +31,6 @@ public class CalibrationView extends View {
         bitmap = b;
         board = CalibrationPrefs.getBoard(prefs);
         for (int i=0;i<3;i++) slots[i] = CalibrationPrefs.getSlot(prefs, i);
-        setLayerType(View.LAYER_TYPE_SOFTWARE, null);
 
         gridPaint.setStyle(Paint.Style.STROKE);
         gridPaint.setStrokeWidth(dp(2));
